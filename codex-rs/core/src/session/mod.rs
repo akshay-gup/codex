@@ -4625,6 +4625,7 @@ impl Session {
                 .features
                 .enabled(Feature::InstantInterrupt)
                 .then(CancellationToken::new),
+            managed_context_epoch: std::sync::OnceLock::new(),
             realtime: self.conversation.snapshot().await,
             settings,
             token_budget,

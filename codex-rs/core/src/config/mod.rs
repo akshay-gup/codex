@@ -646,6 +646,8 @@ pub enum ThreadStoreConfig {
 /// Application configuration loaded from disk and merged with overrides.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
+    /// Live managed-runner policy; not a config.toml setting or resumable state.
+    pub managed_context_decay: Option<Arc<crate::managed_context_decay::ManagedContextDecay>>,
     /// App-server-owned destination policy; other runtimes remain unmanaged.
     pub application_network_policy: codex_http_client::NetworkPolicy,
     /// Auth bootstrap routing installed by the app-server configuration owner.
@@ -4559,6 +4561,7 @@ impl Config {
         let otel = otel::resolve_config(cfg.otel.unwrap_or_default(), &mut startup_warnings);
         let mut config = Self {
             plugins: cfg.plugins,
+            managed_context_decay: None,
             prefer_mxc,
             model,
             daybreak_enabled: cfg.daybreak.unwrap_or(false),

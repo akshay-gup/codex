@@ -890,6 +890,24 @@ impl ToolRegistry {
                 Some(Arc::new(assessment));
         }
 
+        if let Some(decay) = &invocation.turn.config.managed_context_decay {
+            let payload = tool.pre_tool_use_payload(&invocation).map(|payload| serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": payload.tool_name.name(),
+                "tool_input": payload.tool_input,
+                "tool_use_id": invocation.call_id,
+                "cwd": crate::hook_runtime::tool_hook_cwd(&invocation.step_context.environments, &invocation.turn),
+            }));
+            let allowed = decay.access(&invocation.session, &invocation.step_context, payload, false)
+                .await.map_err(FunctionCallError::Fatal)?;
+            if !allowed {
+                let err = FunctionCallError::RespondToModel(crate::managed_context_decay::DEFER.to_string());
+                dispatch_trace.record_failed(&err);
+                notify_tool_finish_if_unclaimed(&invocation, call_state.as_deref(), ToolCallOutcome::Blocked).await;
+                return Err(err);
+            }
+        }
+
         if registered_tool.native_review == NativeReview::Required
             && let Err(err) = super::review_native_tool_call(&invocation).await
         {
@@ -960,6 +978,18 @@ impl ToolRegistry {
         } else {
             None
         };
+        if let Some(decay) = &invocation.turn.config.managed_context_decay
+            && let Some(payload) = &post_tool_use_payload
+        {
+            decay.access(&invocation.session, &invocation.step_context, Some(serde_json::json!({
+                "hook_event_name": "PostToolUse",
+                "tool_name": payload.tool_name.name(),
+                "tool_input": payload.tool_input,
+                "tool_response": payload.tool_response,
+                "tool_use_id": payload.tool_use_id,
+                "cwd": crate::hook_runtime::tool_hook_cwd(&invocation.step_context.environments, &invocation.turn),
+            })), true).await.map_err(FunctionCallError::Fatal)?;
+        }
         let post_tool_use_outcome = if let Some(post_tool_use_payload) = post_tool_use_payload {
             Some(
                 run_post_tool_use_hooks(

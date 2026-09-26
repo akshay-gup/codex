@@ -116,6 +116,44 @@ use wiremock::matchers::path;
 
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 
+#[test]
+fn removing_managed_message_requires_full_websocket_input_replay() -> anyhow::Result<()> {
+    let client = test_model_client(SessionSource::Cli);
+    let metadata = test_responses_metadata_for_client(
+        &client, None, format!("{}:0", client.state.thread_id), None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let root = crate::context::ContextualUserFragment::into(
+        crate::context::HookAdditionalContext::new("root"),
+    );
+    let guide = crate::context::ContextualUserFragment::into(
+        crate::context::HookAdditionalContext::new("scoped guide"),
+    );
+    let copy = ResponseItem::from(ResponseInputItem::FunctionCallOutput {
+        call_id: "copy".into(),
+        output: FunctionCallOutputPayload::from_text("scoped guide".into()),
+    });
+    let build = |input| client.build_responses_request(
+        &Prompt { input, ..Default::default() }, &test_model_info(), None,
+        codex_protocol::config_types::ReasoningSummary::None, None, &metadata, false,
+    );
+    let previous = build(vec![root.clone(), guide.clone(), copy.clone()])?;
+    for (input, reusable) in [
+        (vec![root.clone(), guide, copy.clone()], true),
+        (vec![root, copy], false),
+    ] {
+        let current = build(input)?;
+        let mut session = client.new_session();
+        session.websocket_session.last_request = Some(previous.clone());
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        sender.send(super::LastResponse { response_id: "old".into(), items_added: Vec::new() }).unwrap();
+        session.websocket_session.last_response_rx = Some(receiver);
+        // None becomes previous_response_id=None with complete current input.
+        assert_eq!(session.prepare_websocket_request(&current).is_some(), reusable);
+    }
+    Ok(())
+}
+
 fn test_model_client(session_source: SessionSource) -> ModelClient {
     test_model_client_with_thread_id(ThreadId::new(), session_source)
 }

@@ -30,6 +30,8 @@ pub(crate) struct StepContext {
     pub(crate) sampled_through_sequence: Option<u64>,
     /// Final serving value for this invocation; retained by its code cell across waits.
     pub(crate) serving_assessment: Option<Arc<crate::guardian::ServingAssessment>>,
+    /// Logical inference identity, reused by transport retries.
+    pub(crate) managed_context_epoch: std::sync::OnceLock<u64>,
     pub(crate) turn: Arc<TurnContext>,
     /// Preempts this request and yields its code-mode observations when user input arrives.
     pub(crate) preempt: Option<CancellationToken>,

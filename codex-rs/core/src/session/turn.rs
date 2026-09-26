@@ -1941,16 +1941,25 @@ async fn run_sampling_request(
             sess.clone_history().await
         };
         let input_item_count = history.raw_items().len();
-        let sampling_step_context = Arc::new(StepContext {
-            sampled_through_sequence: Some(history.input_sequence()),
-            ..step_context.as_ref().clone()
-        });
+        let input_sequence = history.input_sequence();
         let mut prompt_input = history
             .for_prompt(
                 &step_context.settings.model_info.input_modalities,
                 sess.services.image_store.as_ref(),
             )
             .await;
+        // Managed decay binds the inference epoch to `step_context` before the
+        // per-attempt context is cloned, so tools and acknowledgement see it.
+        if let Some(decay) = &turn_context.config.managed_context_decay {
+            decay
+                .filter_prompt(&step_context, &mut prompt_input)
+                .await
+                .map_err(CodexErr::Fatal)?;
+        }
+        let sampling_step_context = Arc::new(StepContext {
+            sampled_through_sequence: Some(input_sequence),
+            ..step_context.as_ref().clone()
+        });
         sess.services
             .executed_tool_calls
             .attach_to_prompt(&mut prompt_input, &mut executed_tool_calls_by_output);
@@ -3183,6 +3192,9 @@ async fn try_run_sampling_request(
             ResponseEvent::Created { response_id } => {
                 answer_moderation = None;
                 response_id_for_assessment.clone_from(&response_id);
+                if let Some(decay) = &turn_context.config.managed_context_decay {
+                    decay.acknowledge(&step_context).await.map_err(CodexErr::Fatal)?;
+                }
                 if let Some(response_id) = response_id {
                     turn_context
                         .extension_data
