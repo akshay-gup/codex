@@ -340,9 +340,17 @@ impl CoreToolRuntime for ExecCommandHandler {
 
         parse_arguments::<ExecCommandArgs>(arguments)
             .ok()
-            .map(|args| PreToolUsePayload {
-                tool_name: HookToolName::bash(),
-                tool_input: serde_json::json!({ "command": args.cmd }),
+            .map(|args| {
+                let mut tool_input = serde_json::json!({ "command": args.cmd });
+                if let Ok(original_input) = serde_json::from_str::<serde_json::Value>(arguments)
+                    && let Some(workdir) = original_input.get("workdir")
+                {
+                    tool_input["workdir"] = workdir.clone();
+                }
+                PreToolUsePayload {
+                    tool_name: HookToolName::bash(),
+                    tool_input,
+                }
             })
     }
 
