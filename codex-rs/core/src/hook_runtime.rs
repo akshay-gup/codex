@@ -245,7 +245,7 @@ pub(crate) async fn run_pre_tool_use_hooks(
 }
 
 #[allow(deprecated)]
-fn tool_hook_cwd(environments: &TurnEnvironmentSnapshot, turn: &TurnContext) -> AbsolutePathBuf {
+pub(crate) fn tool_hook_cwd(environments: &TurnEnvironmentSnapshot, turn: &TurnContext) -> AbsolutePathBuf {
     // Hooks run on the host, so a remote workspace cannot replace the local fallback.
     environments
         .local_environment_cwd()

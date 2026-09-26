@@ -3942,6 +3942,7 @@ impl Session {
         ) = prepared_tools??;
         turn_context.extension_data.insert(selected_plugins);
         Ok(Arc::new(StepContext {
+            managed_context_epoch: std::sync::OnceLock::new(),
             realtime: self.conversation.snapshot().await,
             settings,
             token_budget,

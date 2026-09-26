@@ -1608,7 +1608,9 @@ async fn run_sampling_request(
     loop {
         // Running code-mode cells can request review while this response is in flight.
         // Keep the latest received ID until response.created replaces it.
-        let prompt_input = if let Some(input) = initial_input.take() {
+        let prompt_input = if let Some(decay) = &turn_context.config.managed_context_decay {
+            decay.snapshot(&sess, &step_context).await.map_err(CodexErr::Fatal)?
+        } else if let Some(input) = initial_input.take() {
             input
         } else {
             sess.clone_history()
@@ -2592,6 +2594,9 @@ async fn try_run_sampling_request(
 
         match event {
             ResponseEvent::Created { response_id } => {
+                if let Some(decay) = &turn_context.config.managed_context_decay {
+                    decay.acknowledge(&step_context).await.map_err(CodexErr::Fatal)?;
+                }
                 if let Some(response_id) = response_id {
                     turn_context
                         .extension_data

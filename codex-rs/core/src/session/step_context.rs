@@ -18,6 +18,8 @@ use codex_protocol::protocol::TurnContextItem;
 
 /// Request-scoped state that may change between model sampling requests.
 pub(crate) struct StepContext {
+    /// Logical inference identity, reused by transport retries.
+    pub(crate) managed_context_epoch: std::sync::OnceLock<u64>,
     pub(crate) turn: Arc<TurnContext>,
     /// Realtime call activity and instructions captured for this sampling request.
     pub(crate) realtime: RealtimeConversationSnapshot,
