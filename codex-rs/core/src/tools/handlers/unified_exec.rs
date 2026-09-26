@@ -85,7 +85,14 @@ fn post_unified_exec_tool_use_payload(
         return None;
     };
 
-    let tool_input = result.post_tool_use_input(&invocation.payload)?;
+    let mut tool_input = result.post_tool_use_input(&invocation.payload)?;
+    if let ToolPayload::Function { arguments } = &invocation.payload
+        && let Ok(original_input) = serde_json::from_str::<serde_json::Value>(arguments)
+        && let Some(workdir) = original_input.get("workdir")
+        && let Some(tool_input) = tool_input.as_object_mut()
+    {
+        tool_input.insert("workdir".to_string(), workdir.clone());
+    }
     let tool_use_id = result.post_tool_use_id(&invocation.call_id);
     let tool_response = result.post_tool_use_response(&tool_use_id, &invocation.payload)?;
     Some(PostToolUsePayload {

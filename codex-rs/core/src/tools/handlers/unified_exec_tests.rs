@@ -374,7 +374,7 @@ async fn exec_command_reuses_foreign_windows_grant() {
 }
 
 #[tokio::test]
-async fn exec_command_pre_tool_use_payload_uses_raw_command() {
+async fn exec_command_pre_tool_use_payload_uses_raw_command_without_workdir() {
     let payload = ToolPayload::Function {
         arguments: serde_json::json!({ "cmd": "printf exec command" }).to_string(),
     };
@@ -399,6 +399,30 @@ async fn exec_command_pre_tool_use_payload_uses_raw_command() {
             tool_input: serde_json::json!({ "command": "printf exec command" }),
         })
     );
+}
+
+#[tokio::test]
+async fn exec_command_pre_tool_use_payload_preserves_explicit_workdir() {
+    for workdir in [
+        serde_json::json!("../nested directory"),
+        serde_json::json!(""),
+        serde_json::Value::Null,
+    ] {
+        let payload = ToolPayload::Function {
+            arguments: serde_json::json!({ "cmd": "printf exec command", "workdir": workdir })
+                .to_string(),
+        };
+        let invocation = invocation_for_payload("exec_command", "call-pre-workdir", payload).await;
+        let handler = ExecCommandHandler::default();
+
+        assert_eq!(
+            handler.pre_tool_use_payload(&invocation),
+            Some(crate::tools::registry::PreToolUsePayload {
+                tool_name: HookToolName::bash(),
+                tool_input: serde_json::json!({ "command": "printf exec command", "workdir": workdir }),
+            })
+        );
+    }
 }
 
 #[tokio::test]
@@ -455,6 +479,40 @@ async fn exec_command_post_tool_use_payload_uses_output_for_noninteractive_one_s
             tool_response: serde_json::json!("three"),
         })
     );
+}
+
+#[tokio::test]
+async fn exec_command_post_tool_use_payload_preserves_explicit_workdir() {
+    for workdir in [serde_json::json!("nested directory"), serde_json::Value::Null] {
+        let payload = ToolPayload::Function {
+            arguments: serde_json::json!({ "cmd": "echo three", "workdir": workdir }).to_string(),
+        };
+        let output = ExecCommandToolOutput {
+            event_call_id: "call-workdir".to_string(),
+            chunk_id: "chunk-1".to_string(),
+            wall_time: std::time::Duration::from_millis(1),
+            raw_output: b"three".to_vec(),
+            truncation_policy: TEST_TRUNCATION_POLICY,
+            max_output_tokens: None,
+            process_id: None,
+            exit_code: Some(0),
+            original_token_count: None,
+            output_omitted_bytes: None,
+            hook_command: Some("echo three".to_string()),
+        };
+        let invocation = invocation_for_payload("exec_command", "call-workdir", payload).await;
+        let handler = ExecCommandHandler::default();
+
+        assert_eq!(
+            handler.post_tool_use_payload(&invocation, &output),
+            Some(crate::tools::registry::PostToolUsePayload {
+                tool_name: HookToolName::bash(),
+                tool_use_id: "call-workdir".to_string(),
+                tool_input: serde_json::json!({ "command": "echo three", "workdir": workdir }),
+                tool_response: serde_json::json!("three"),
+            })
+        );
+    }
 }
 
 #[tokio::test]
