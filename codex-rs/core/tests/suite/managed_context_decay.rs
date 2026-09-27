@@ -60,6 +60,7 @@ print(json.dumps({{'schema': 1, 'guides': guides, 'observations': []}}))
     }).build(&server).await?;
     test.submit_turn_with_permission_profile("Begin.", PermissionProfile::Disabled).await?;
     let requests = responses.requests();
+    let labelled_guide = format!("<AGENTS_MD path=\"{}\">\nSCOPED_GUIDE\n</AGENTS_MD>", scope.join("AGENTS.md").display());
     assert_eq!(requests.len(), lifetime as usize + 5);
     assert_eq!(fs::read_to_string(marker)?, "xx");
     let expired = lifetime as usize + 2;
@@ -67,6 +68,7 @@ print(json.dumps({{'schema': 1, 'guides': guides, 'observations': []}}))
         let present = index != 0 && index != expired;
         let developers = request.message_input_texts("developer");
         assert_eq!(developers.iter().any(|text| text.contains("SCOPED_GUIDE")), present);
+        assert_eq!(developers.iter().any(|text| text == &labelled_guide), present);
         assert!(developers.iter().any(|text| text.contains("FIXED_ROOT")));
     }
     let activation = requests[1].input().into_iter().enumerate().find(|(_, item)| {

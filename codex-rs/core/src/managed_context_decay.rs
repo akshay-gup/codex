@@ -182,8 +182,12 @@ impl State {
             let revised = self.active.contains_key(&guide.path);
             // Identity is generated here, never recovered by matching the body.
             let id = ResponseItemId::new("msg");
+            let path_attribute = guide.path.replace('&', "&amp;")
+                .replace('<', "&lt;").replace('>', "&gt;")
+                .replace('"', "&quot;").replace('\'', "&#x27;")
+                .replace('\t', "&#9;").replace('\n', "&#10;").replace('\r', "&#13;");
             let mut item = ContextualUserFragment::into(HookAdditionalContext::new(
-                format!("<CONTEXT>\n{}\n</CONTEXT>", guide.content.trim_end()),
+                format!("<AGENTS_MD path=\"{path_attribute}\">\n{}\n</AGENTS_MD>", guide.content.trim_end()),
             ));
             item.set_id(Some(id.clone()));
             self.owned.insert(id.clone());
