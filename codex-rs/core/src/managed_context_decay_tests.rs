@@ -16,6 +16,22 @@ fn message(text: &str) -> ResponseItem {
 }
 
 #[test]
+fn guidance_labels_escaped_source_without_changing_body() {
+    let mut state = State::default();
+    let epoch = step(&mut state);
+    let additions = state.observe(epoch.id, vec![Guide {
+        path: "/a&\"'<b>\t\n\r/AGENTS.md".into(),
+        digest: "v1".into(),
+        content: "  <literal>& \"quoted\"\nsecond line  \n".into(),
+    }], NonZeroU64::new(2).unwrap()).unwrap();
+    let mut expected = message(
+        "<AGENTS_MD path=\"/a&amp;&quot;&#x27;&lt;b&gt;&#9;&#10;&#13;/AGENTS.md\">\n  <literal>& \"quoted\"\nsecond line\n</AGENTS_MD>",
+    );
+    expected.set_id(additions[0].id().cloned());
+    assert_eq!(additions, vec![expected]);
+}
+
+#[test]
 fn k_one_and_two_grant_k_actual_future_inferences() {
     for k in [1, 2] {
         let mut state = State::default();
@@ -70,7 +86,7 @@ fn identity_only_removal_revision_and_reentry() {
     let k = NonZeroU64::new(1).unwrap();
     let first_epoch = state.current.unwrap();
     let first = state.observe(first_epoch, vec![guide("a", "v1"), guide("b", "v1")], k).unwrap();
-    let copy = message("<CONTEXT>\nsame guide text\n</CONTEXT>");
+    let copy = message("<AGENTS_MD path=\"a\">\nsame guide text\n</AGENTS_MD>");
     let root = message("fixed root");
     let mut history = vec![root.clone(), first[0].clone(), copy.clone(), first[1].clone()];
     let epoch = step(&mut state);
