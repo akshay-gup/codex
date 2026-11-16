@@ -14,6 +14,129 @@ use serde_json::json;
 use tempfile::TempDir;
 use test_case::test_case;
 
+#[cfg(not(target_os = "windows"))]
+#[test_case(false; "native_patch")]
+#[test_case(true; "code_mode_nested_patch")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn write_report_is_advisory_for_one_inference_and_denial_does_not_latch(
+    code_mode: bool,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let fixture = TempDir::new()?;
+    let marker = fixture.path().join("executions");
+    let resolver = fixture.path().join("resolve.py");
+    fs::write(
+        &resolver,
+        r#"
+import json, sys
+p = json.load(sys.stdin)
+command = p.get('tool_input', {}).get('command', '')
+denied = p.get('hook_event_name') == 'PreToolUse' and 'ROOT_BLOCK' in command
+reports = []
+if p.get('hook_event_name') == 'PostToolUse' and p.get('tool_name') == 'apply_patch':
+    reports = [{'path': '/notes.md', 'digest': 'v1', 'content': 'WRITE_REPORT'}]
+print(json.dumps({'schema': 1, 'guides': [], 'observations': [], 'reports': reports, 'deny': 'ROOT_FIXED' if denied else ''}))
+"#,
+    )?;
+    let denied_patch = "*** Begin Patch\n*** Add File: AGENTS.md\n+ROOT_BLOCK\n*** End Patch\n";
+    let safe_patch =
+        "*** Begin Patch\n*** Add File: nested/AGENTS.md\n+malformed prose\n*** End Patch\n";
+    let command = format!("printf x >> {}", marker.display());
+    let mut first = vec![ev_response_created("r1")];
+    if code_mode {
+        let code = format!(
+            "try {{ text(await tools.apply_patch({denied_patch:?})); }} catch(e) {{ text(String(e)); }}\ntext(await tools.apply_patch({safe_patch:?}));\ntext(await tools.exec_command({{cmd:{command:?}}}));"
+        );
+        first.push(ev_custom_tool_call("edits", "exec", &code));
+    } else {
+        first.extend([
+            ev_apply_patch_custom_tool_call("denied", denied_patch),
+            ev_apply_patch_custom_tool_call("safe", safe_patch),
+            ev_function_call(
+                "after",
+                "exec_command",
+                &json!({"cmd": command}).to_string(),
+            ),
+        ]);
+    }
+    first.push(ev_completed("r1"));
+    let next_command = format!("printf y >> {}", marker.display());
+    let next_call = if code_mode {
+        ev_custom_tool_call(
+            "next",
+            "exec",
+            &format!("text(await tools.exec_command({{cmd:{next_command:?}}}));"),
+        )
+    } else {
+        ev_function_call(
+            "next",
+            "exec_command",
+            &json!({"cmd": next_command}).to_string(),
+        )
+    };
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(first),
+            sse(vec![
+                ev_response_created("r2"),
+                next_call,
+                ev_completed("r2"),
+            ]),
+            sse(vec![
+                ev_response_created("r3"),
+                ev_assistant_message("done", "done"),
+                ev_completed("r3"),
+            ]),
+        ],
+    )
+    .await;
+    let resolver_command = vec!["python3".into(), resolver.to_string_lossy().into_owned()];
+    let mut builder = test_codex()
+        .with_model("test-gpt-5.1-codex")
+        .with_config(move |config| {
+            if code_mode {
+                let _ = config.features.enable(Feature::CodeMode);
+            }
+            config.developer_instructions = Some("FIXED_ROOT".into());
+            config.project_doc_max_bytes = 0;
+            config.managed_context_decay = Some(Arc::new(
+                ManagedContextDecay::new(NonZeroU64::new(5).unwrap(), resolver_command).unwrap(),
+            ));
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    fs::write(test.workspace_path("AGENTS.md"), "fixed root file\n")?;
+    test.submit_turn_with_permission_profile("Begin.", PermissionProfile::Disabled)
+        .await?;
+    assert_eq!(fs::read_to_string(marker)?, "xy");
+    assert_eq!(
+        fs::read_to_string(test.workspace_path("AGENTS.md"))?,
+        "fixed root file\n"
+    );
+    assert_eq!(
+        fs::read_to_string(test.workspace_path("nested/AGENTS.md"))?,
+        "malformed prose\n"
+    );
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 3);
+    let denial = if code_mode {
+        requests[1].custom_tool_call_output("edits").to_string()
+    } else {
+        requests[1].custom_tool_call_output("denied").to_string()
+    };
+    assert!(denial.contains("ROOT_FIXED"));
+    for (index, request) in requests.iter().enumerate() {
+        let developers = request.message_input_texts("developer");
+        assert_eq!(
+            developers.iter().any(|text| text.contains("WRITE_REPORT")),
+            index == 1
+        );
+        assert!(developers.iter().any(|text| text.contains("FIXED_ROOT")));
+    }
+    Ok(())
+}
+
 // Exercise native registry admission and actual request serialization. The
 // fixture resolver deliberately returns the same text as a later tool output.
 #[test_case(1; "k_one")]

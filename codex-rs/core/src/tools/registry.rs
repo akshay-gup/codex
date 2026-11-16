@@ -898,10 +898,17 @@ impl ToolRegistry {
                 "tool_use_id": invocation.call_id,
                 "cwd": crate::hook_runtime::tool_hook_cwd(&invocation.step_context.environments, &invocation.turn),
             }));
-            let allowed = decay.access(&invocation.session, &invocation.step_context, payload, false)
-                .await.map_err(FunctionCallError::Fatal)?;
-            if !allowed {
-                let err = FunctionCallError::RespondToModel(crate::managed_context_decay::DEFER.to_string());
+            if let PreToolUseHookResult::Blocked(message) = decay
+                .access(
+                    &invocation.session,
+                    &invocation.step_context,
+                    payload,
+                    /*post*/ false,
+                )
+                .await
+                .map_err(FunctionCallError::Fatal)?
+            {
+                let err = FunctionCallError::RespondToModel(message);
                 dispatch_trace.record_failed(&err);
                 notify_tool_finish_if_unclaimed(&invocation, call_state.as_deref(), ToolCallOutcome::Blocked).await;
                 return Err(err);
