@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 
 use crate::context::ContextualUserFragment;
 use crate::context::HookAdditionalContext;
+use crate::hook_runtime::PreToolUseHookResult;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 
@@ -65,7 +66,10 @@ struct Epoch {
 struct ActiveGuide {
     digest: String,
     id: ResponseItemId,
-    expires_after: u64,
+    // Reports acquire their one-step deadline when first projected, so a late
+    // result cannot expire inside a request captured before it was published.
+    expires_after: Option<u64>,
+    advisory: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +77,10 @@ struct Resolution {
     schema: u32,
     guides: Vec<Guide>,
     observations: Vec<Value>,
+    #[serde(default)]
+    reports: Vec<Guide>,
+    #[serde(default)]
+    deny: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,9 +121,9 @@ impl State {
             self.submitted = epoch.ordinal;
             let mut expired = false;
             self.active.retain(|path, guide| {
-                let retained = guide.expires_after >= epoch.ordinal;
+                let retained = guide.expires_after.is_none_or(|deadline| deadline >= epoch.ordinal);
                 if !retained {
-                    expired = true;
+                    expired |= !guide.advisory;
                     tracing::info!(target: "metalanguage::agents_decay", action = "expired", path, step = epoch.ordinal);
                 }
                 retained
@@ -149,10 +157,20 @@ impl State {
         })
     }
 
-    fn filter(&self, input: &mut Vec<ResponseItem>, ordinal: u64) {
-        let retained: HashSet<_> = self.active.values()
-            .filter(|guide| guide.expires_after >= ordinal)
-            .map(|guide| &guide.id).collect();
+    fn filter(&mut self, input: &mut Vec<ResponseItem>, ordinal: u64) {
+        for guide in self.active.values_mut() {
+            guide.expires_after.get_or_insert(ordinal);
+        }
+        let retained: HashSet<_> = self
+            .active
+            .values()
+            .filter(|guide| {
+                guide
+                    .expires_after
+                    .is_some_and(|deadline| deadline >= ordinal)
+            })
+            .map(|guide| &guide.id)
+            .collect();
         input.retain(|item| {
             !matches!(item, ResponseItem::Message { role, .. } if role == "developer")
                 || item.id().is_none_or(|id| !self.owned.contains(id) || retained.contains(id))
@@ -175,7 +193,7 @@ impl State {
             if let Some(active) = self.active.get_mut(&guide.path)
                 && active.digest == guide.digest
             {
-                active.expires_after = deadline;
+                active.expires_after = Some(deadline);
                 tracing::info!(target: "metalanguage::agents_decay", action = "renewed", path = guide.path, step = self.submitted, expires_after = deadline);
                 continue;
             }
@@ -192,7 +210,15 @@ impl State {
             item.set_id(Some(id.clone()));
             self.owned.insert(id.clone());
             tracing::info!(target: "metalanguage::agents_decay", action = if revised { "revised" } else { "added" }, path = guide.path, digest = guide.digest, message_id = id.as_str(), step = self.submitted, expires_after = deadline);
-            self.active.insert(guide.path, ActiveGuide { digest: guide.digest, id, expires_after: deadline });
+            self.active.insert(
+                guide.path,
+                ActiveGuide {
+                    digest: guide.digest,
+                    id,
+                    expires_after: Some(deadline),
+                    advisory: false,
+                },
+            );
             additions.push(item);
         }
         if !additions.is_empty() {
@@ -204,6 +230,42 @@ impl State {
             epoch.blocked_at_sequence = Some(sequence);
         }
         Ok(additions)
+    }
+
+    fn observe_reports(&mut self, reports: Vec<Guide>) -> Vec<ResponseItem> {
+        let mut additions = Vec::new();
+        for report in reports {
+            if report.path.is_empty()
+                || report.digest.is_empty()
+                || report.content.trim().is_empty()
+            {
+                continue;
+            }
+            let key = format!("{}#lines-report", report.path);
+            if self
+                .active
+                .get(&key)
+                .is_some_and(|active| active.digest == report.digest)
+            {
+                continue;
+            }
+            let id = ResponseItemId::new("msg");
+            let mut item = ContextualUserFragment::into(HookAdditionalContext::new(report.content));
+            item.set_id(Some(id.clone()));
+            self.owned.insert(id.clone());
+            self.active.insert(
+                key,
+                ActiveGuide {
+                    digest: report.digest,
+                    id,
+                    expires_after: None,
+                    advisory: true,
+                },
+            );
+            additions.push(item);
+        }
+        // Advisory delivery and expiry never change the admission revision.
+        additions
     }
 }
 
@@ -275,26 +337,38 @@ impl ManagedContextDecay {
         step: &StepContext,
         payload: Option<Value>,
         post: bool,
-    ) -> Result<bool, String> {
+    ) -> Result<PreToolUseHookResult, String> {
         let mut state = self.state.lock().await;
-        let Some(id) = step.managed_context_epoch.get().copied() else { return Ok(false) };
+        let Some(id) = step.managed_context_epoch.get().copied() else {
+            return Ok(PreToolUseHookResult::Blocked(DEFER.to_string()));
+        };
         if !state.can_observe(id) {
             self.audit(serde_json::json!({"event": "stale_access", "epoch": id,
                 "origin_guidance_revision": state.epochs.get(&id).map(|epoch| epoch.guidance_revision),
                 "current_guidance_revision": state.guidance_revision, "post": post}))?;
-            return Ok(false);
+            return Ok(PreToolUseHookResult::Blocked(DEFER.to_string()));
         }
         if let Some(payload) = payload {
             let resolution = self.resolve(payload).await?;
+            if !post
+                && let Some(reason) = resolution.deny.filter(|reason| !reason.trim().is_empty())
+            {
+                self.audit(
+                    serde_json::json!({"event": "access_denied", "epoch": id, "reason": reason}),
+                )?;
+                return Ok(PreToolUseHookResult::Blocked(reason));
+            }
             let mut next = state.clone();
-            let additions = next.observe(id, resolution.guides, self.lifetime)?;
+            let mut additions = next.observe(id, resolution.guides, self.lifetime)?;
+            additions.extend(next.observe_reports(resolution.reports));
             self.audit(serde_json::json!({"event": "access_prepared", "epoch": id,
                 "post": post, "observations": resolution.observations,
                 "guidance_revision": next.guidance_revision,
                 "added_managed_ids": additions.iter().filter_map(|item| item.id()).collect::<Vec<_>>(),
                 "deferred": !next.permitted(id),
                 "active": next.active.iter().map(|(path, guide)| serde_json::json!({
-                    "path": path, "digest": guide.digest, "id": guide.id, "expires_after": guide.expires_after
+                    "path": path, "digest": guide.digest, "id": guide.id, "expires_after": guide.expires_after,
+                    "advisory": guide.advisory
                 })).collect::<Vec<_>>() }))?;
             // Register ownership before the cancellable history write. If it
             // is interrupted, any partially recorded additions stay excluded;
@@ -307,7 +381,13 @@ impl ManagedContextDecay {
             self.audit(serde_json::json!({"event": "access_committed", "epoch": id, "post": post}))?;
             tracing::info!(target: "metalanguage::agents_decay", action = if post { "post_access" } else { "pre_access" }, epoch = id, observations = %serde_json::json!(resolution.observations), deferred = !state.permitted(id));
         }
-        Ok(state.permitted(id))
+        Ok(if state.permitted(id) {
+            PreToolUseHookResult::Continue {
+                updated_input: None,
+            }
+        } else {
+            PreToolUseHookResult::Blocked(DEFER.to_string())
+        })
     }
 
     async fn resolve(&self, payload: Value) -> Result<Resolution, String> {

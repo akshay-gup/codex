@@ -280,10 +280,12 @@ async fn concurrent_accesses_publish_once_and_stale_fallback_cannot_revive() {
         manager.access(&session, &first, Some(serde_json::json!({"path":"a"})), false),
         manager.access(&session, &first, Some(serde_json::json!({"path":"b"})), false),
     );
-    assert!(!a.unwrap());
-    assert!(!b.unwrap());
+    assert!(matches!(a.unwrap(), PreToolUseHookResult::Blocked(message) if message == DEFER));
+    assert!(matches!(b.unwrap(), PreToolUseHookResult::Blocked(message) if message == DEFER));
     assert_eq!(manager.state.lock().await.active.len(), 2);
-    assert!(!manager.access(&session, &first, None, false).await.unwrap());
+    assert!(
+        matches!(manager.access(&session, &first, None, false).await.unwrap(), PreToolUseHookResult::Blocked(message) if message == DEFER)
+    );
     let second = StepContext::for_test(Arc::clone(&turn));
     let request = manager.snapshot(&session, &second).await.unwrap();
     manager.acknowledge(&second).await.unwrap();
@@ -291,13 +293,121 @@ async fn concurrent_accesses_publish_once_and_stale_fallback_cannot_revive() {
     assert_eq!(request.iter().filter(|item| item.id().is_some_and(|id| ids.contains(id))).count(), 2);
     // The original cell's post result arrives after the next snapshot. Ignore
     // it even before a newer request has completed, without invoking resolver.
-    assert!(!manager.access(&session, &first, Some(serde_json::json!({"path":"late"})), true).await.unwrap());
+    assert!(
+        matches!(manager.access(&session, &first, Some(serde_json::json!({"path":"late"})), true).await.unwrap(), PreToolUseHookResult::Blocked(message) if message == DEFER)
+    );
     assert!(!manager.state.lock().await.active.contains_key("late"));
     // A current-epoch fallback is activated and becomes available next step.
-    assert!(!manager.access(&session, &second, Some(serde_json::json!({"path":"fallback"})), true).await.unwrap());
+    assert!(
+        matches!(manager.access(&session, &second, Some(serde_json::json!({"path":"fallback"})), true).await.unwrap(), PreToolUseHookResult::Blocked(message) if message == DEFER)
+    );
     let third = StepContext::for_test(turn);
     manager.snapshot(&session, &third).await.unwrap();
     manager.acknowledge(&third).await.unwrap();
     let state = manager.state.lock().await;
     assert_eq!(state.active.keys().cloned().collect::<Vec<_>>(), vec!["fallback".to_string()]);
+}
+
+#[test]
+fn advisory_reports_expire_after_one_inference_without_staling_programs() {
+    let mut state = State::default();
+    let first = step(&mut state);
+    let guide = state
+        .observe(
+            first.id,
+            vec![guide("scope", "v1")],
+            NonZeroU64::new(3).unwrap(),
+        )
+        .unwrap();
+    let second = step(&mut state);
+    let revision = state.guidance_revision;
+    let report = || Guide {
+        path: "notes.md".into(),
+        digest: "bad".into(),
+        content: "WRITE_REPORT".into(),
+    };
+    let additions = state.observe_reports(vec![report()]);
+    assert_eq!(state.guidance_revision, revision);
+    assert!(state.permitted(second.id));
+    assert!(state.observe_reports(vec![report()]).is_empty());
+    let copy = message("WRITE_REPORT");
+    let mut history = vec![guide[0].clone(), additions[0].clone(), copy.clone()];
+    state.filter(&mut history, 3);
+    assert_eq!(history.len(), 3);
+    let third = step(&mut state);
+    let fourth = step(&mut state);
+    state.filter(&mut history, fourth.ordinal);
+    assert_eq!(history, vec![guide[0].clone(), copy]);
+    assert_eq!(state.guidance_revision, revision);
+    assert!(state.permitted(third.id));
+    assert!(state.permitted(fourth.id));
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn hard_denial_keeps_its_message_and_leaves_guidance_and_admission_unchanged() {
+    let (session, turn) = crate::session::tests::make_session_and_context().await;
+    let session = Arc::new(session);
+    let step = StepContext::for_test(Arc::new(turn));
+    let manager = ManagedContextDecay::new(NonZeroU64::new(2).unwrap(), vec![
+        "python3".into(), "-c".into(),
+        "import json,sys; json.load(sys.stdin); print(json.dumps({'schema':1,'guides':[{'path':'ignored','digest':'v1','content':'guide'}],'observations':[],'deny':'ROOT_FIXED'}))".into(),
+    ]).unwrap();
+    manager.snapshot(&session, &step).await.unwrap();
+    manager.acknowledge(&step).await.unwrap();
+    let result = manager
+        .access(
+            &session,
+            &step,
+            Some(serde_json::json!({})),
+            /*post*/ false,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, PreToolUseHookResult::Blocked(message) if message == "ROOT_FIXED"));
+    let state = manager.state.lock().await;
+    assert!(state.active.is_empty());
+    assert_eq!(state.guidance_revision, 0);
+    assert!(state.permitted(*step.managed_context_epoch.get().unwrap()));
+}
+
+#[test]
+fn report_after_a_pending_snapshot_survives_until_the_next_eligible_inference() {
+    let mut state = State::default();
+    step(&mut state);
+    let pending = state.begin(None).unwrap();
+    let report = state.observe_reports(vec![Guide {
+        path: "notes.md".into(),
+        digest: "bad".into(),
+        content: "late report".into(),
+    }]);
+    state.acknowledge(pending.id).unwrap();
+    let next = state.begin(None).unwrap();
+    let mut input = report.clone();
+    state.filter(&mut input, next.ordinal);
+    assert_eq!(input, report);
+    state.acknowledge(next.id).unwrap();
+    let expired = state.begin(None).unwrap();
+    state.filter(&mut input, expired.ordinal);
+    assert!(input.is_empty());
+}
+
+#[test]
+fn failed_pending_request_does_not_give_a_late_report_an_extra_acknowledged_step() {
+    let mut state = State::default();
+    step(&mut state);
+    state.begin(None).unwrap();
+    let report = state.observe_reports(vec![Guide {
+        path: "notes.md".into(),
+        digest: "bad".into(),
+        content: "late report".into(),
+    }]);
+    let replacement = state.begin(None).unwrap();
+    let mut input = report.clone();
+    state.filter(&mut input, replacement.ordinal);
+    assert_eq!(input, report);
+    state.acknowledge(replacement.id).unwrap();
+    let next = state.begin(None).unwrap();
+    state.filter(&mut input, next.ordinal);
+    assert!(input.is_empty());
 }
