@@ -124,10 +124,10 @@ fn removing_managed_message_requires_full_websocket_input_replay() -> anyhow::Re
         TestCodexResponsesRequestKind::Turn,
     );
     let root = crate::context::ContextualUserFragment::into(
-        crate::context::HookAdditionalContext::new("root"),
+        crate::context::HookAdditionalContext::new(codex_hooks::HookContext::harness("root".to_string())),
     );
     let guide = crate::context::ContextualUserFragment::into(
-        crate::context::HookAdditionalContext::new("scoped guide"),
+        crate::context::HookAdditionalContext::new(codex_hooks::HookContext::harness("scoped guide".to_string())),
     );
     let copy = ResponseItem::from(ResponseInputItem::FunctionCallOutput {
         call_id: "copy".into(),
@@ -149,7 +149,7 @@ fn removing_managed_message_requires_full_websocket_input_replay() -> anyhow::Re
         sender.send(super::LastResponse { response_id: "old".into(), items_added: Vec::new() }).unwrap();
         session.websocket_session.last_response_rx = Some(receiver);
         // None becomes previous_response_id=None with complete current input.
-        assert_eq!(session.prepare_websocket_request(&current).is_some(), reusable);
+        assert_eq!(session.prepare_websocket_request(&current).is_ok(), reusable);
     }
     Ok(())
 }

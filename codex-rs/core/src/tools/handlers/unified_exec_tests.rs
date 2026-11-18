@@ -665,14 +665,14 @@ async fn exec_command_post_tool_use_payload_preserves_explicit_workdir() {
             event_call_id: "call-workdir".to_string(),
             chunk_id: "chunk-1".to_string(),
             wall_time: std::time::Duration::from_millis(1),
-            raw_output: b"three".to_vec(),
+            raw_output: "three".into(),
             truncation_policy: TEST_TRUNCATION_POLICY,
             max_output_tokens: None,
             process_id: None,
             exit_code: Some(0),
             original_token_count: None,
-            output_omitted_bytes: None,
             hook_command: Some("echo three".to_string()),
+            tool_cwd: None,
         };
         let invocation = invocation_for_payload("exec_command", "call-workdir", payload).await;
         let handler = ExecCommandHandler::default();
@@ -684,6 +684,7 @@ async fn exec_command_post_tool_use_payload_preserves_explicit_workdir() {
                 tool_use_id: "call-workdir".to_string(),
                 tool_input: serde_json::json!({ "command": "echo three", "workdir": workdir }),
                 tool_response: serde_json::json!("three"),
+                tool_cwd: None,
             })
         );
     }

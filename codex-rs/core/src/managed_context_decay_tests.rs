@@ -12,7 +12,7 @@ fn step(state: &mut State) -> Epoch {
 }
 
 fn message(text: &str) -> ResponseItem {
-    ContextualUserFragment::into(HookAdditionalContext::new(text))
+    ContextualUserFragment::into(HookAdditionalContext::new(codex_hooks::HookContext::harness(text.to_string())))
 }
 
 #[test]

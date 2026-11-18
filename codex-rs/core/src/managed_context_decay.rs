@@ -199,14 +199,15 @@ impl State {
             }
             let revised = self.active.contains_key(&guide.path);
             // Identity is generated here, never recovered by matching the body.
-            let id = ResponseItemId::new("msg");
+            let id = ResponseItemId::with_suffix("msg", uuid::Uuid::now_v7());
             let path_attribute = guide.path.replace('&', "&amp;")
                 .replace('<', "&lt;").replace('>', "&gt;")
                 .replace('"', "&quot;").replace('\'', "&#x27;")
                 .replace('\t', "&#9;").replace('\n', "&#10;").replace('\r', "&#13;");
-            let mut item = ContextualUserFragment::into(HookAdditionalContext::new(
-                format!("<AGENTS_MD path=\"{path_attribute}\">\n{}\n</AGENTS_MD>", guide.content.trim_end()),
-            ));
+            let mut item = ContextualUserFragment::into(HookAdditionalContext::new(codex_hooks::HookContext {
+                text: format!("<AGENTS_MD path=\"{path_attribute}\">\n{}\n</AGENTS_MD>", guide.content.trim_end()),
+                metadata: codex_protocol::models::ContentItemMetadata::harness(),
+            }));
             item.set_id(Some(id.clone()));
             self.owned.insert(id.clone());
             tracing::info!(target: "metalanguage::agents_decay", action = if revised { "revised" } else { "added" }, path = guide.path, digest = guide.digest, message_id = id.as_str(), step = self.submitted, expires_after = deadline);
@@ -249,8 +250,11 @@ impl State {
             {
                 continue;
             }
-            let id = ResponseItemId::new("msg");
-            let mut item = ContextualUserFragment::into(HookAdditionalContext::new(report.content));
+            let id = ResponseItemId::with_suffix("msg", uuid::Uuid::now_v7());
+            let mut item = ContextualUserFragment::into(HookAdditionalContext::new(codex_hooks::HookContext {
+                text: report.content,
+                metadata: codex_protocol::models::ContentItemMetadata::harness(),
+            }));
             item.set_id(Some(id.clone()));
             self.owned.insert(id.clone());
             self.active.insert(
